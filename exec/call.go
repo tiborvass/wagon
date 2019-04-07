@@ -4,7 +4,9 @@
 
 package exec
 
-import "errors"
+import (
+	"errors"
+)
 
 var (
 	// ErrSignatureMismatch is the error value used while trapping the VM when
@@ -19,12 +21,14 @@ var (
 
 func (vm *VM) call() {
 	index := vm.fetchUint32()
+	//fmt.Printf("direct call to:\t\t%s %s\t\t\t[%T]\n", vm.module.FunctionIndexSpace[index].Name, vm.module.FunctionIndexSpace[index].Sig, vm.funcs[index])
 
 	vm.funcs[index].call(vm, int64(index))
 }
 
 func (vm *VM) callIndirect() {
 	index := vm.fetchUint32()
+
 	fnExpect := vm.module.Types.Entries[index]
 	_ = vm.fetchUint32() // reserved (https://github.com/WebAssembly/design/blob/27ac254c854994103c24834a994be16f74f54186/BinaryEncoding.md#call-operators-described-here)
 	tableIndex := vm.popUint32()
@@ -53,5 +57,6 @@ func (vm *VM) callIndirect() {
 		}
 	}
 
+	//fmt.Printf("indirect call to:\t\t%s\t\t\t[%T]\n", fnActual.Name, vm.funcs[elemIndex])
 	vm.funcs[elemIndex].call(vm, int64(elemIndex))
 }

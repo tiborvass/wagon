@@ -51,6 +51,19 @@ func (m *Module) populateFunctions() error {
 		m.FunctionIndexSpace = append(m.FunctionIndexSpace, fn)
 	}
 
+	for _, custom := range m.Customs {
+		if custom.Name == "name" {
+			names, err := CustomReadNames(custom.Data)
+			if err != nil {
+				return err
+			}
+			for _, n := range names {
+				m.FunctionIndexSpace[n.Index].Name = n.Name
+			}
+			break
+		}
+	}
+
 	funcs := make([]uint32, 0, len(m.Function.Types)+len(m.imports.Funcs))
 	funcs = append(funcs, m.imports.Funcs...)
 	funcs = append(funcs, m.Function.Types...)

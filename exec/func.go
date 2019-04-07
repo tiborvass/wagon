@@ -16,6 +16,10 @@ type function interface {
 	call(vm *VM, index int64)
 }
 
+type named interface {
+	Name() string
+}
+
 type compiledFunction struct {
 	code           []byte
 	codeMeta       *compile.BytecodeMetadata
@@ -24,6 +28,7 @@ type compiledFunction struct {
 	totalLocalVars int  // number of local variables used by the function
 	args           int  // number of arguments the function accepts
 	returns        bool // whether the function returns a value
+	name           string
 
 	asm []asmBlock
 }
@@ -36,41 +41,72 @@ type asmBlock struct {
 }
 
 type goFunction struct {
-	val reflect.Value
-	typ reflect.Type
+	val  reflect.Value
+	typ  reflect.Type
+	name string
+}
+
+func (fn goFunction) Name() string {
+	return fn.name
+}
+
+func wasmToReflect(val *reflect.Value, i int, kind reflect.Kind, raw uint64) {
+	switch kind {
+	case reflect.Float64, reflect.Float32:
+		val.SetFloat(math.Float64frombits(raw))
+	case reflect.Uint32, reflect.Uint64:
+		val.SetUint(raw)
+	case reflect.Int32, reflect.Int64:
+		val.SetInt(int64(raw))
+	default:
+		panic(fmt.Sprintf("exec: args %d invalid kind=%v", i, kind))
+	}
 }
 
 func (fn goFunction) call(vm *VM, index int64) {
-	// numIn = # of call inputs + vm, as the function expects
-	// an additional *VM argument
-	numIn := fn.typ.NumIn()
-	args := make([]reflect.Value, numIn)
-	proc := NewProcess(vm)
+	fsig := vm.module.FunctionIndexSpace[index].Sig
+	nparams := len(fsig.ParamTypes)
 
-	// Pass proc as an argument. Check that the function indeed
-	// expects a *Process argument.
-	if reflect.ValueOf(proc).Kind() != fn.typ.In(0).Kind() {
-		panic(fmt.Sprintf("exec: the first argument of a host function was %s, expected %s", fn.typ.In(0).Kind(), reflect.ValueOf(vm).Kind()))
+	proc := NewProcess(vm, index)
+	// Adjust in case first argument is proc.
+	// This allows to handle functions both with and without proc.
+	startIndexForParams := 0
+	if fn.typ.NumIn() > 0 && reflect.TypeOf(proc).ConvertibleTo(fn.typ.In(0)) {
+		startIndexForParams = 1
+		nparams++
 	}
-	args[0] = reflect.ValueOf(proc)
+	args := make([]reflect.Value, nparams)
 
-	for i := numIn - 1; i >= 1; i-- {
+	// If the function is variadic, let's distinguish between the variadic
+	// and non-variadic parts of params.
+	endIndexForNonVariadicParams := nparams - 1
+	isVariadic := fn.typ.IsVariadic()
+	if isVariadic {
+		endIndexForNonVariadicParams = fn.typ.NumIn() - 2
+		// Since the last parameters are being popped first
+		// let's handle the variadic ones first if any.
+		typ := fn.typ.In(fn.typ.NumIn() - 1).Elem()
+		kind := typ.Kind()
+		// We populate until (and including) the index of the variadic slice parameter of the Go function.
+		for i := nparams - 1; i >= endIndexForNonVariadicParams+1; i-- {
+			val := reflect.New(typ).Elem()
+			raw := vm.popUint64()
+			wasmToReflect(&val, i, kind, raw)
+			args[i] = val
+		}
+	}
+
+	for i := endIndexForNonVariadicParams; i >= startIndexForParams; i-- {
 		val := reflect.New(fn.typ.In(i)).Elem()
 		raw := vm.popUint64()
 		kind := fn.typ.In(i).Kind()
-
-		switch kind {
-		case reflect.Float64, reflect.Float32:
-			val.SetFloat(math.Float64frombits(raw))
-		case reflect.Uint32, reflect.Uint64:
-			val.SetUint(raw)
-		case reflect.Int32, reflect.Int64:
-			val.SetInt(int64(raw))
-		default:
-			panic(fmt.Sprintf("exec: args %d invalid kind=%v", i, kind))
-		}
-
+		wasmToReflect(&val, i, kind, raw)
 		args[i] = val
+	}
+
+	// Add proc as first argument if function needs it.
+	if startIndexForParams > 0 {
+		args[0] = reflect.ValueOf(proc)
 	}
 
 	rtrns := fn.val.Call(args)
@@ -119,4 +155,8 @@ func (compiled compiledFunction) call(vm *VM, index int64) {
 	if compiled.returns {
 		vm.pushUint64(rtrn)
 	}
+}
+
+func (compiled compiledFunction) Name() string {
+	return compiled.name
 }

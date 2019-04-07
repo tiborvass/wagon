@@ -12,6 +12,8 @@ import (
 
 var logger *log.Logger
 
+var allowStub bool = true
+
 func init() {
 	SetDebugMode(false)
 }

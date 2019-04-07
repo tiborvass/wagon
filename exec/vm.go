@@ -128,8 +128,9 @@ func NewVM(module *wasm.Module, opts ...VMOption) (*VM, error) {
 		// https://webassembly.github.io/spec/core/exec/modules.html#allocation
 		if fn.IsHost() {
 			vm.funcs[i] = goFunction{
-				typ: fn.Host.Type(),
-				val: fn.Host,
+				typ:  fn.Host.Type(),
+				val:  fn.Host,
+				name: fn.Name,
 			}
 			nNatives++
 			continue
@@ -154,6 +155,7 @@ func NewVM(module *wasm.Module, opts ...VMOption) (*VM, error) {
 			totalLocalVars: totalLocalVars,
 			args:           len(fn.Sig.ParamTypes),
 			returns:        len(fn.Sig.ReturnTypes) != 0,
+			name:           fn.Name,
 		}
 	}
 
@@ -464,12 +466,13 @@ func (vm *VM) Close() error {
 // Process is a proxy passed to host functions in order to access
 // things such as memory and control.
 type Process struct {
-	vm *VM
+	vm    *VM
+	Index int64
 }
 
 // NewProcess creates a VM interface object for host functions
-func NewProcess(vm *VM) *Process {
-	return &Process{vm: vm}
+func NewProcess(vm *VM, index int64) *Process {
+	return &Process{vm: vm, Index: index}
 }
 
 // ReadAt implements the ReaderAt interface: it copies into p
@@ -516,7 +519,23 @@ func (proc *Process) WriteAt(p []byte, off int64) (int, error) {
 	return length, err
 }
 
+func (proc *Process) VM() *VM {
+	return proc.vm
+}
+
 // Terminate stops the execution of the current module.
 func (proc *Process) Terminate() {
 	proc.vm.abort = true
+}
+
+func (proc *Process) Module() *wasm.Module {
+	return proc.vm.module
+}
+
+func (proc *Process) Debug() interface{} {
+	return proc.vm.module.FunctionIndexSpace[proc.Index]
+	//fn := proc.vm.module.FunctionIndexSpace[proc.vm.ctx.curFunc]
+	//name := fn.(named).Name()
+	//fmt.Println(fn.Name)
+	return nil
 }

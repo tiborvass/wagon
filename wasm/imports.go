@@ -153,9 +153,17 @@ func (module *Module) resolveImports(resolve ResolveFunc) error {
 			return ErrNoExportsInImportedModule
 		}
 
+		stub := false
 		exportEntry, ok := importedModule.Export.Entries[importEntry.FieldName]
 		if !ok {
-			return ExportNotFoundError{importEntry.ModuleName, importEntry.FieldName}
+			// An export entry that has an empty string name, handles all the undefined functions that cannot be imported.
+			// If allowStub is true and this special entry is present, do not error out, just stub it.
+			exportEntry, ok = importedModule.Export.Entries[""]
+			if !allowStub || !ok {
+				return ExportNotFoundError{importEntry.ModuleName, importEntry.FieldName}
+			}
+			//exportEntry.FieldStr = importEntry.FieldName
+			stub = true
 		}
 
 		if exportEntry.Kind != importEntry.Type.Kind() {
@@ -174,8 +182,21 @@ func (module *Module) resolveImports(resolve ResolveFunc) error {
 			if fn == nil {
 				return InvalidFunctionIndexError(index)
 			}
-
 			importIndex := importEntry.Type.(FuncImport).Type
+			// If allowStub is true and we're importing a variadic host function without a specified signature
+			// then this function is our undefined function handler and we need to force match the signature
+			// to the one that the importer needs.
+			if stub {
+				if fn.IsHost() && fn.Host.Type().IsVariadic() {
+					if !allowStub {
+						panic("allowStub not allowed")
+					}
+					sig := module.Types.Entries[importIndex]
+					fn.Sig = &sig
+				} else {
+					return InvalidImportError{importEntry.ModuleName, importEntry.FieldName, importIndex}
+				}
+			}
 			if len(fn.Sig.ReturnTypes) != len(module.Types.Entries[importIndex].ReturnTypes) || len(fn.Sig.ParamTypes) != len(module.Types.Entries[importIndex].ParamTypes) {
 				return InvalidImportError{importEntry.ModuleName, importEntry.FieldName, importIndex}
 			}
@@ -190,6 +211,9 @@ func (module *Module) resolveImports(resolve ResolveFunc) error {
 				}
 			}
 			module.FunctionIndexSpace = append(module.FunctionIndexSpace, *fn)
+			if fn.Body == nil {
+				fn.Body = new(FunctionBody)
+			}
 			module.Code.Bodies = append(module.Code.Bodies, *fn.Body)
 			module.imports.Funcs = append(module.imports.Funcs, funcs)
 			funcs++

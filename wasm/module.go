@@ -6,6 +6,7 @@ package wasm
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 
@@ -19,11 +20,21 @@ const (
 	Version uint32 = 0x1
 )
 
+var reflectToValueType = map[reflect.Kind]ValueType{
+	reflect.Int32:   ValueTypeI32,
+	reflect.Int64:   ValueTypeI64,
+	reflect.Uint32:  ValueTypeI32,
+	reflect.Uint64:  ValueTypeI64,
+	reflect.Float32: ValueTypeF32,
+	reflect.Float64: ValueTypeF64,
+}
+
 // Function represents an entry in the function index space of a module.
 type Function struct {
 	Sig  *FunctionSig
 	Body *FunctionBody
 	Host reflect.Value
+	Name string
 }
 
 // IsHost indicates whether this function is a host function as defined in:
@@ -76,6 +87,43 @@ func (m *Module) Custom(name string) *SectionCustom {
 		}
 	}
 	return nil
+}
+
+func (m *Module) AddHostFunc(name string, fn interface{}) {
+	val := reflect.ValueOf(fn)
+	typ := val.Type()
+	if typ.Kind() != reflect.Func {
+		panic(fmt.Errorf("AddHostFunc expects a function, got %s", typ.Kind()))
+	}
+	// FIXME: gross, but there is an import cycle with exec.
+	offset := 0
+	firstParamIsProcess := typ.NumIn() > 0 && typ.In(0).String() == "*exec.Process"
+	if firstParamIsProcess {
+		offset = 1
+	}
+	hostFn := Function{Host: val, Sig: &FunctionSig{Form: 0}}
+	if name != "" && typ.IsVariadic() {
+		panic(fmt.Errorf("AddHostFunc only supports variadic functions for the \"\" undefined function handler"))
+	}
+	if !typ.IsVariadic() {
+		paramTypes := make([]ValueType, typ.NumIn()-offset)
+		for i := 0; i < len(paramTypes); i++ {
+			paramTypes[i] = reflectToValueType[typ.In(i+offset).Kind()]
+		}
+		returnTypes := make([]ValueType, typ.NumOut())
+		for i := 0; i < len(returnTypes); i++ {
+			returnTypes[i] = reflectToValueType[typ.Out(i).Kind()]
+		}
+		hostFn.Sig.ParamTypes = paramTypes
+		hostFn.Sig.ReturnTypes = returnTypes
+	}
+	index := uint32(len(m.FunctionIndexSpace))
+	m.FunctionIndexSpace = append(m.FunctionIndexSpace, hostFn)
+	m.Types.Entries = append(m.Types.Entries, *hostFn.Sig)
+	if m.Export.Entries == nil {
+		m.Export.Entries = map[string]ExportEntry{}
+	}
+	m.Export.Entries[name] = ExportEntry{FieldStr: name, Kind: ExternalFunction, Index: index}
 }
 
 // NewModule creates a new empty module
