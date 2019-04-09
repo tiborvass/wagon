@@ -6,26 +6,25 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	"gvisor.googlesource.com/gvisor/pkg/abi/linux"
 	"gvisor.googlesource.com/gvisor/pkg/cpuid"
-	"gvisor.googlesource.com/gvisor/pkg/log"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/context"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/fs"
+
+	// "gvisor.googlesource.com/gvisor/pkg/sentry/fs/host"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/kernel/kdefs"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/limits"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/loader"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/memutil"
-	// "gvisor.googlesource.com/gvisor/pkg/sentry/platform/filemem"
+	"gvisor.googlesource.com/gvisor/pkg/sentry/pgalloc"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/platform/ptrace"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/socket/hostinet"
 	slinux "gvisor.googlesource.com/gvisor/pkg/sentry/syscalls/linux"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/time"
 	"gvisor.googlesource.com/gvisor/pkg/sentry/usage"
-	"gvisor.googlesource.com/gvisor/pkg/sentry/pgalloc"
 
 	_ "gvisor.googlesource.com/gvisor/pkg/sentry/fs/dev"
 	// _ "gvisor.googlesource.com/gvisor/pkg/sentry/fs/gofer"
@@ -37,14 +36,24 @@ import (
 	_ "gvisor.googlesource.com/gvisor/pkg/sentry/fs/tty"
 )
 
-func main() {
-	if err := Run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+func createMemoryFile() (*pgalloc.MemoryFile, error) {
+	const memfileName = "runsc-memory"
+	memfd, err := memutil.CreateMemFD(memfileName, 0)
+	if err != nil {
+		return nil, fmt.Errorf("error creating memfd: %v", err)
 	}
+	memfile := os.NewFile(uintptr(memfd), memfileName)
+	mf, err := pgalloc.NewMemoryFile(memfile)
+	if err != nil {
+		memfile.Close()
+		return nil, fmt.Errorf("error creating pgalloc.MemoryFile: %v", err)
+	}
+	return mf, nil
 }
 
 func Run() error {
+	// log.SetLevel(log.Debug)
+
 	var hostnet bool
 	flag.BoolVar(&hostnet, "hostnet", false, "use host-networking")
 	var tty bool
@@ -54,8 +63,6 @@ func Run() error {
 
 	flag.Parse()
 	args := flag.Args()
-
-	log.SetLevel(log.Debug)
 
 	// Register the global syscall table.
 	kernel.RegisterSyscallTable(slinux.AMD64)
@@ -73,9 +80,10 @@ func Run() error {
 		Platform: p,
 	}
 
+	// Create memory file.
 	mf, err := createMemoryFile()
 	if err != nil {
-		return fmt.Errorf("error creating memory file: %v", err)
+		return fmt.Errorf("creating memory file: %v", err)
 	}
 	k.SetMemoryFile(mf)
 
@@ -90,22 +98,9 @@ func Run() error {
 	}
 	tk.SetClocks(time.NewCalibratedClocks())
 
-	/*
-		networkStack, err := netStack(k, hostnet)
-		if err != nil {
-			return err
-		}
-	*/
-
-	networkStack := hostinet.NewStack()
-	//stack, ok := networkStack.(*hostinet.Stack)
-	if true /* ok */ {
-		fmt.Println("configure")
-		if err := networkStack.Configure(); err != nil {
-			return err
-		}
-
-		fmt.Printf("int: %v\n", networkStack.Interfaces())
+	networkStack, err := hostinet.NewStack(), nil //netStack(k)
+	if err != nil {
+		return err
 	}
 
 	creds := auth.NewUserCredentials(
@@ -122,7 +117,7 @@ func Run() error {
 		NetworkStack:                networkStack,
 		ApplicationCores:            uint(runtime.NumCPU()),
 		Vdso:                        vdso,
-		RootUTSNamespace:            kernel.NewUTSNamespace("uprivilegedhost", "", creds.UserNamespace),
+		RootUTSNamespace:            kernel.NewUTSNamespace("gvisorhost", "", creds.UserNamespace),
 		RootIPCNamespace:            kernel.NewIPCNamespace(creds.UserNamespace),
 		RootAbstractSocketNamespace: kernel.NewAbstractSocketNamespace(),
 	}); err != nil {
@@ -168,16 +163,27 @@ func Run() error {
 
 	mns := k.RootMountNamespace()
 	if mns == nil {
-		maxSymlinkTraversals := uint(linux.MaxSymlinkTraversals)
-		mns, err := createMountNamespace(ctx, rootCtx, strings.Split(mounts, ","), &maxSymlinkTraversals)
+		mns, err := createMountNamespace(ctx, rootCtx, mounts)
 		if err != nil {
 			return fmt.Errorf("error creating mounts: %v", err)
 		}
 		k.SetRootMountNamespace(mns)
 	}
+
 	_, _, err = k.CreateProcess(procArgs)
 	if err != nil {
 		return fmt.Errorf("failed to create init process: %v", err)
+	}
+
+	tg := k.GlobalInit()
+	if tty {
+		ttyFile := procArgs.FDMap.GetFile(0)
+		defer ttyFile.DecRef()
+		ttyfop := ttyFile.FileOperations.(*host.TTYFileOperations)
+		// Set the foreground process group on the TTY to the global
+		// init process group, since that is what we are about to
+		// start running.
+		ttyfop.InitForegroundProcessGroup(tg.ProcessGroup())
 	}
 
 	if err := k.Start(); err != nil {
@@ -210,7 +216,7 @@ func addSubmountOverlay(ctx context.Context, inode *fs.Inode, submounts []string
 	return overlayInode, err
 }
 
-func createMountNamespace(userCtx context.Context, rootCtx context.Context, mounts []string, remainingTraversals *uint) (*fs.MountNamespace, error) {
+func createMountNamespace(userCtx context.Context, rootCtx context.Context, mounts string) (*fs.MountNamespace, error) {
 	// Create a tmpfs mount where we create and mount a root filesystem for
 	// each child container.
 	// mounts = append(mounts, specs.Mount{
@@ -241,8 +247,8 @@ func createMountNamespace(userCtx context.Context, rootCtx context.Context, moun
 	if err != nil {
 		return nil, fmt.Errorf("failed to create mount with source: %v", err)
 	}
-
-	dirent, err := mns.FindInode(ctx, root, root, "/proc", remainingTraversals)
+	var maxTraversals uint = 1e6
+	dirent, err := mns.FindInode(ctx, root, root, "/proc", &maxTraversals /* maxTraversals */)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find mount destination: %v", err)
 	}
@@ -263,13 +269,13 @@ func createMountNamespace(userCtx context.Context, rootCtx context.Context, moun
 	return mns, nil
 }
 
-func createRootMount(ctx context.Context, mounts []string) (*fs.Inode, error) {
+func createRootMount(ctx context.Context, mounts string) (*fs.Inode, error) {
 	// First construct the filesystem from the spec.Root.
 	mf := fs.MountSourceFlags{ReadOnly: false}
 
 	var (
-		rootInode, prevInode *fs.Inode
-		err                  error
+		rootInode *fs.Inode
+		err       error
 	)
 
 	wd, err := os.Getwd()
@@ -283,22 +289,9 @@ func createRootMount(ctx context.Context, mounts []string) (*fs.Inode, error) {
 	if !ok {
 		panic(fmt.Sprintf("could not find filesystem host"))
 	}
-	for i, m := range mounts {
-		if !filepath.IsAbs(m) {
-			m = filepath.Join(wd, m)
-		}
-		// fmt.Println("root=" + m)
-		rootInode, err = host.Mount(ctx, "", mf, "root="+m, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate root mount point: %v", err)
-		}
-		if i != 0 {
-			rootInode, err = fs.NewOverlayRoot(ctx, rootInode, prevInode, fs.MountSourceFlags{})
-			if err != nil {
-				return nil, fmt.Errorf("failed to make mount overlay: %v", err)
-			}
-		}
-		prevInode = rootInode
+	rootInode, err = host.Mount(ctx, "", mf, "root="+filepath.Join(wd, mounts), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate root mount point: %v", err)
 	}
 
 	submounts := []string{"/dev", "/sys", "/proc", "/tmp"}
@@ -348,6 +341,9 @@ func createRootMount(ctx context.Context, mounts []string) (*fs.Inode, error) {
 	return rootInode, nil
 }
 
+// createFDMap creates an FD map that contains stdin, stdout, and stderr. If
+// console is true, then ioctl calls will be passed through to the host FD.
+// Upon success, createFDMap dups then closes stdioFDs.
 func createFDMap(ctx context.Context, k *kernel.Kernel, l *limits.LimitSet, console bool, stdioFDs []int) (*kernel.FDMap, error) {
 	if len(stdioFDs) != 3 {
 		return nil, fmt.Errorf("stdioFDs should contain exactly 3 FDs (stdin, stdout, and stderr), but %d FDs received", len(stdioFDs))
@@ -408,17 +404,8 @@ func createFDMap(ctx context.Context, k *kernel.Kernel, l *limits.LimitSet, cons
 	return fdm, nil
 }
 
-func createMemoryFile() (*pgalloc.MemoryFile, error) {
-	const memfileName = "runsc-memory"
-	memfd, err := memutil.CreateMemFD(memfileName, 0)
-	if err != nil {
-		return nil, fmt.Errorf("error creating memfd: %v", err)
+func main() {
+	if err := Run(); err != nil {
+		panic(err)
 	}
-	memfile := os.NewFile(uintptr(memfd), memfileName)
-	mf, err := pgalloc.NewMemoryFile(memfile)
-	if err != nil {
-		memfile.Close()
-		return nil, fmt.Errorf("error creating pgalloc.MemoryFile: %v", err)
-	}
-	return mf, nil
 }
