@@ -5,6 +5,7 @@
 package wasm
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 )
@@ -51,14 +52,19 @@ func (m *Module) populateFunctions() error {
 		m.FunctionIndexSpace = append(m.FunctionIndexSpace, fn)
 	}
 
-	for _, custom := range m.Customs {
-		if custom.Name == "name" {
-			names, err := CustomReadNames(custom.Data)
+	for _, sec := range m.Customs {
+		if sec.Name == CustomSectionName {
+			ns := &NameSection{}
+			ns.UnmarshalWASM(bytes.NewReader(sec.Data))
+			nss, err := ns.Decode(NameFunction)
 			if err != nil {
 				return err
 			}
-			for _, n := range names {
-				m.FunctionIndexSpace[n.Index].Name = n.Name
+			if nss == nil {
+				break
+			}
+			for idx, name := range nss.(*FunctionNames).Names {
+				m.FunctionIndexSpace[idx].Name = name
 			}
 			break
 		}
