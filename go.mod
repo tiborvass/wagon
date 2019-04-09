@@ -7,4 +7,4 @@ require (
 	gvisor.googlesource.com/gvisor v0.0.0
 )
 
-replace gvisor.googlesource.com/gvisor => github.com/tonistiigi/gvisor v0.0.0-20190327064434-76af1016cd3e4363a3d8dc555ae264a4b130e799
+replace gvisor.googlesource.com/gvisor => /root/gvisor

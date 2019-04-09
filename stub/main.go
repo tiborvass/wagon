@@ -147,7 +147,7 @@ func run(w io.Writer, fname string, verify bool) {
 		log.Fatalf("could not create VM: %v", err)
 	}
 
-	name := "main"
+	name := "add"
 	e, ok := m.Export.Entries[name]
 	if !ok {
 		log.Fatal("main function not found")
@@ -158,7 +158,7 @@ func run(w io.Writer, fname string, verify bool) {
 	if len(ftype.ReturnTypes) > 1 {
 		log.Fatalf("running exported functions with more than one return value is not supported")
 	}
-	o, err := vm.ExecCode(i, 0, 0)
+	o, err := vm.ExecCode(i, 8, 7)
 	if err != nil {
 		fmt.Fprintf(w, "\n")
 		log.Fatalf("err=%v", err)
