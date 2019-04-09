@@ -1008,7 +1008,8 @@ type NameSection struct {
 func (s *NameSection) UnmarshalWASM(r io.Reader) error {
 	s.Types = make(map[NameType][]byte)
 	for {
-		typ, err := leb128.ReadVarUint32(r)
+		var typ [1]byte
+		_, err := r.Read(typ[:])
 		if err == io.EOF {
 			return nil
 		} else if err != nil {
@@ -1018,7 +1019,7 @@ func (s *NameSection) UnmarshalWASM(r io.Reader) error {
 		if err != nil {
 			return err
 		}
-		s.Types[NameType(typ)] = data
+		s.Types[NameType(typ[0])] = data
 	}
 }
 

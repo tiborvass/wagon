@@ -16,7 +16,6 @@ import (
 
 	"github.com/go-interpreter/wagon/disasm"
 	"github.com/go-interpreter/wagon/wasm"
-	"github.com/go-interpreter/wagon/wasm/leb128"
 )
 
 // TODO: track the number of imported funcs,memories,tables and globals to adjust
@@ -339,25 +338,32 @@ func printDetails(w io.Writer, fname string, m *wasm.Module) {
 	for _, sec := range m.Customs {
 		fmt.Fprintf(w, "%v:\n", sec.ID)
 		fmt.Fprintf(w, " - name: %q\n", sec.Name)
-		raw := bytes.NewReader(sec.Bytes[6:])
-		for {
-			if raw.Len() == 0 {
-				break
+		switch sec.Name {
+		case wasm.CustomSectionName:
+			raw := bytes.NewReader(sec.Data)
+			ns := &wasm.NameSection{}
+			ns.UnmarshalWASM(raw)
+			for _, typ := range []wasm.NameType{wasm.NameModule, wasm.NameFunction, wasm.NameLocal} {
+				if _, ok := ns.Types[typ]; !ok {
+					continue
+				}
+				nss, err := ns.Decode(typ)
+				if err != nil {
+					log.Fatal(err)
+				}
+				switch nss := nss.(type) {
+				case *wasm.ModuleName:
+					fmt.Fprintf(w, "   - module: %q\n", nss.Name)
+				case *wasm.FunctionNames:
+					fmt.Fprintf(w, "   - functions: %v\n", nss.Names)
+				case *wasm.LocalNames:
+					fmt.Fprintf(w, "   - locals: %v\n", nss.Funcs)
+				default:
+					panic(fmt.Errorf("unknown namesubsection type %T", nss))
+				}
 			}
-			i, err := leb128.ReadVarUint32(raw)
-			if err != nil {
-				log.Fatal(err)
-			}
-			n, err := leb128.ReadVarUint32(raw)
-			if err != nil {
-				log.Fatal(err)
-			}
-			str := make([]byte, int(n))
-			_, err = io.ReadFull(raw, str)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Fprintf(w, " - func[%d] %v\n", i, string(str))
+		default:
+			fmt.Fprint(w, hexDump(sec.Data, 0))
 		}
 	}
 }
